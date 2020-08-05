@@ -1,0 +1,164 @@
+---
+title: "Stats202C-HW1"
+author: "Juan Piao"
+date: "4/4/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+suppressMessages(library(EpiModel))
+library(earlyR)
+library(tidyverse)
+library(magrittr)
+```
+
+## 1) Deterministic Compartmental Models for Epidemics in continuous time. 
+### Consider the continuous time SIR model discussed in 202Clecture0 (Part 1), “Modeling the effects of public health interventions on COVID-19 transmission”. For this model, use calculus to determine the final epidemic size. This is the total number of people ultimately infected when S(0) = N and there is an infinitesimal initial infection. Express the fraction infected as a function of R0.
+
+The deterministic SIR model is defined by the following set of differential equations:
+\begin{align}
+\frac{dS}{dt}= - \frac{\beta I S}{N}\\
+\frac{dR}{dt}=\gamma I \\
+\frac{dI}{dt} = \frac{\beta I S}{N} - \gamma I 
+\end{align}
+
+Devide (1) by (2), we obtain
+\[
+\frac{dS}{dR} = - \frac{\beta}{\gamma}\frac{S}{N}= -R_0 \frac{S}{N}
+\]
+where $R_0 = \frac{\beta}{\gamma}$
+
+Solving the differential equation, gives
+\begin{align*}
+\frac{dS}{S} = -\frac{R_0}{N}dR\\
+ln(S)= - \frac{R_0}{N}R +c\\
+S=  c_0 exp\{ -\frac{R_0}{N}R \} 
+\end{align*}
+Using the initial condition R(0)=0, we get $c_0=S(0)$. 
+Hence, $$S(t)=S(0)exp\{ - R_0\frac{R(t)}{N} \}$$
+
+When $t=\infty$, $i(\infty)=0$
+Thus, $S(\infty)= N - R(\infty)$
+Plug in to the above equation and divide by N, we get
+$$ \frac{R(\infty)}{N} = 1- exp\{-R_0 \frac{R(\infty)}{N}\}$$
+
+## 2) Deterministic Compartmental Models for Epidemics in discrete time
+### a) Using the dcm() function in EpiModel model an SIR epidemic with S = 999;I = 1; R = 0 . Assume the transmission probability per act is 0.3 , the act rate is 0.6 and the recovery rate is 0.1 .What is R0 for this infectious disease system? What is the final epidemic size? Does the epidemic “take off” (that is, is there a non-negligible increase in the prevalence over a non-neglible length of time)?
+
+```{r}
+param <- param.dcm(inf.prob = 0.3, act.rate = 0.6, rec.rate = 1/10)
+init <- init.dcm(s.num = 999, i.num = 1, r.num = 0)
+control <- control.dcm(type = "SIR", nsteps = 500, dt = 0.5)
+mod <- dcm(param, init, control)
+
+incidence_counts <- as.data.frame(mod, out="mean") %>%
+                        select(time, si.flow, i.num, r.num)
+ 
+  # the final epidemic size (r.num)
+   incidence_counts[999, 'r.num']
+
+```
+
+
+$$R_0= \tau \alpha / \rho = 0.3*0.6/0.1= 1.8$$
+$\tau$ is the transmission probability per act.
+$\alpha$ is the act rate.
+$\rho$ is the recovery rate.
+
+Since $R_0 >1$, one infected individual will on average infect >1 person total, the disease "take off".
+
+The final epidemic size is 733.
+
+### b) Using the dcm() function in EpiModel model an SIR epidemic with S = 1000;I = 1; R = 0 . Assume the transmission probability per act is 0.2 , the act rate is 1.4 and the recovery rate is 0.1. What is R0 for this infectious disease system? What is the final epidemic size? Does the epidemic “take off”?
+
+```{r, eval=TRUE, warning=FALSE}
+
+param <- param.dcm(inf.prob = 0.2, act.rate = 1.4, rec.rate = 1/10)
+init <- init.dcm(s.num = 1000, i.num = 1, r.num = 0)
+control <- control.dcm(type = "SIR", nsteps = 500, dt = 0.5)
+mod <- dcm(param, init, control)
+incidence_counts <- as.data.frame(mod, out="mean") %>%
+                        select(time, si.flow, i.num, r.num)
+ 
+  # the final epidemic size (r.num)
+   incidence_counts[999, 'r.num']
+```
+
+
+
+
+$$R_0= \tau \alpha / \rho = 0.2*1.4/0.1= 2.8$$
+$\tau$ is the transmission probability per act.
+$\alpha$ is the act rate.
+$\rho$ is the recovery rate.
+
+Since $R_0 >1$, one infected individual will on average infect >1 person total, the disease "take off".
+
+The final epidemic size is 926.
+
+### c) What does the transmission probability per act need to be so that R0 = 1 for this infectious disease system?
+$$R_0= \tau \alpha / \rho = \tau *1.4/0.1= 1$$
+Solve for $\tau$ gives $\tau= 1/14=0.0714$.
+
+
+The transmission probability per act need to be 0.0714 so that $R_0=1$.
+
+### d) What is the time step of peak disease incidence?
+```{r}
+#i.num and si.flow are disease prevalence and incidence.
+  # collect the relevant results in a data frame
+  incidence_counts <- as.data.frame(mod, out="mean") %>%
+                        select(time, si.flow, i.num, r.num)
+  incidence_counts$time[which.max(incidence_counts$si.flow)] 
+                        
+
+
+```
+
+The time step of peak disease incidence is 36 and the peak disease incidence is  `r format( max(incidence_counts$si.flow, na.rm = T), digits=4)`.
+
+
+### e) What is the time step of peak disease prevalence?
+```{r}
+#i.num
+  incidence_counts$time[which.max(incidence_counts$i.num)] 
+
+```
+
+The time step of peak disease prevalence is 43 and the corresponding peak disease prevalence is `r format( max(incidence_counts$i.num, na.rm = T), digits=4)`.
+
+### f) Why is the peak prevalence later than the peak time of disease incidence?
+Prevalence is the total number of infected people during a specified time period.
+Incidence is the number of new cases during a specified time period.
+Prevalence will increase as long as the number of new cases(si.flow) is greater than the number of recovered cases (ir.flow).
+
+From the Diagram below we can see that at the peak time of incidence, time=36, the number of incidence ,si.flow=18.4 is greater than the number of recoverd cases, ir.flow=11.3. Hence, the prevalence keeps increasing. In fact, prevalence keeps increasing and will not reachs its peak until the number of new cases equal to the number of recoverd cases. Once the number of recovered cases outnumbers the number of new cases, the prevalence starts to decrease.
+
+The the peak prevalence is later than the peak time of disease incidence since at the peak time of disease incidence, the incidence is greater than the number of recovered cases (ir.flow) so the peak prevalence is yet to come. 
+
+
+```{r}
+#par(mfrow = c(1, 1))
+comp_plot(mod, at = 36, digits = 1)
+```
+
+
+
+```{r}
+par(mfrow = c(1, 1))
+comp_plot(mod, at = 43, digits = 1)
+```
+
+### g) Create various graphical displays to plot the development of the infectious disease system (with the transmission probability per act of 0.2 ).
+```{r}
+par(mar = c(3.2, 3, 2, 1), mgp = c(2, 1, 0), mfrow = c(1, 2))
+plot(mod, popfrac = FALSE, alpha = 0.5,
+     lwd = 4, main = "Compartment Sizes")
+plot(mod, y = "si.flow", lwd = 4, col = "firebrick",
+     main = "Disease Incidence", legend = "n")
+```
+

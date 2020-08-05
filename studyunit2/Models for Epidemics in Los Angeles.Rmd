@@ -1,0 +1,493 @@
+---
+title: "Stats202C-HW2"
+author: "Juan Piao"
+date: "4/10/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This homework is based on Professor Hancock's lecture note--'202Clecture0 (Part 4)'. The parameters in the lecture note are set for Australia. I updated some of the parameters for our current knowledge of conditions in Los Angeles.
+
+As of Apr 10th, there are 241 deaths out of 8,430 confirmed cases in Los Angeles. This means the mortality rate in Los Angeles is approximately 3%. So I set the mortality rate(fat.rate.base) to 0.03 and the mortality rate for people who needing hospitalization but who can't get into hospital to 0.06.
+
+As of Apr 10th, there are 19472 total cases in california and 2897 needed hospitalization. This shows approximately 15% of cases required hospitalisation. So I set hosp.rate-- rate per day at which symptomatic (or tested positive), infected I compartment people or self-isolated Q compartment people enter the state of requiring hospital care-- to 0.15. A rate of 1.5% per day with an average illness duration of about 10 days means a bit less than 15% of cases will require hospitalisation. 
+
+There are 73867 licensed beds in Los Angeles county, in which there are more than 10 million inhabitants. So, roughly there are 0.0073867 bed per person. This model use the initial population of 10,000. Hence, there are approximately 75 available beds for this model. So I set hosp.cap to 75.
+
+```{r, echo=FALSE, eval=TRUE, message=FALSE}
+library(tidyverse)
+library(magrittr)
+library(lubridate)
+library(stringr)
+library(tibble)
+library(broom)
+library(ggplot2)
+library(gt)
+library(knitr)
+library(devtools)
+library(DiagrammeR)
+library(parallel)
+library(foreach)
+library(tictoc)
+suppressMessages(library(EpiModel))
+library(incidence)
+library(earlyR)
+
+tic("Time to complete")
+```
+
+```{r, echo=FALSE, eval=TRUE, message=FALSE}
+source_files <- c("_icm.mod.init.seiqhrf.R",
+                  "_icm.mod.status.seiqhrf.R",
+                  "_icm.mod.vital.seiqhrf.R",
+                  "_icm.control.seiqhrf.R",
+                  "_icm.utils.seiqhrf.R",
+                  "_icm.saveout.seiqhrf.R",
+                  "_icm.icm.seiqhrf.R")
+
+src_path <- paste0("./_posts/2020-03-18-modeling-the-effects-of-public-health-",
+            "interventions-on-covid-19-transmission-part-2/")
+
+gist_url <- "https://gist.github.com/timchurches/92073d0ea75cfbd387f91f7c6e624bd7"
+
+local_source <- FALSE
+
+for (source_file in source_files) {
+  if (local_source) {
+    source(paste(src_path, source_file, sep=""))
+  } else {
+    source_gist(gist_url, filename=source_file)
+  }
+}
+```
+
+There are following seven compartments in this model.
+
+| Compartment | Functional definition                                                             |
+|-------------|-----------------------------------------------------------------------------------|
+| S           | Susceptible individuals                                                           |
+| E           | Exposed **and** infected, not yet symptomatic but potentially infectious          |
+| I           | Infected, symptomatic **and** infectious                                          |
+| Q           | Infectious, but (self-)isolated                                                |
+| H           | Requiring hospitalization (would normally be hospitalized if capacity available) |
+| R           | Recovered, immune from further infection                                          |
+| F           | Case fatality (death due to COVID-19, not other causes)                           |
+
+
+## Setting up the parameters
+
+
+```{r, echo=TRUE, eval=TRUE}
+# function to set-up and run the baseline simulations
+simulate <- function(# control.icm params
+                     type = "SEIQHRF", 
+                     nsteps = 366, 
+                     nsims = 8,
+                     ncores = 4,
+                     prog.rand = FALSE,
+                     rec.rand = FALSE,
+                     fat.rand = TRUE,
+                     quar.rand = FALSE,
+                     hosp.rand = FALSE,
+                     disch.rand = TRUE,
+                     infection.FUN = infection.seiqhrf.icm,
+                     recovery.FUN = progress.seiqhrf.icm,
+                     departures.FUN = departures.seiqhrf.icm,
+                     arrivals.FUN = arrivals.icm,
+                     get_prev.FUN = get_prev.seiqhrf.icm,
+                     # init.icm params
+                     s.num = 9997,
+                     e.num=0,
+                     i.num = 3,
+                     q.num=0,
+                     h.num=0,
+                     r.num = 0,
+                     f.num = 0,
+                     # param.icm params
+                     inf.prob.e = 0.02, 
+                     act.rate.e = 10,
+                     inf.prob.i = 0.05, 
+                     act.rate.i = 10,
+                     inf.prob.q = 0.02, 
+                     act.rate.q = 2.5,                    
+                     quar.rate = 1/30, 
+                     hosp.rate = 1.5/100,
+                     disch.rate = 1/15,
+                     prog.rate = 1/10,
+                     prog.dist.scale = 5,
+                     prog.dist.shape = 1.5,
+                     rec.rate = 1/20,
+                     rec.dist.scale = 35,
+                     rec.dist.shape = 1.5,
+                     fat.rate.base = 1.5/50,
+                     hosp.cap = 75,
+                     fat.rate.overcap = 3/50,
+                     fat.tcoeff = 0.5,
+                     vital = TRUE,
+                     a.rate = (10.5/365)/1000, 
+                     a.prop.e = 0.01,
+                     a.prop.i = 0.001,
+                     a.prop.q = 0.01,
+                     ds.rate = (7/365)/1000, 
+                     de.rate = (7/365)/1000, 
+                     di.rate = (7/365)/1000,
+                     dq.rate = (7/365)/1000,
+                     dh.rate = (20/365)/1000,
+                     dr.rate = (7/365)/1000,
+                     out="mean"
+                    ) {
+
+  control <- control.icm(type = type, 
+                         nsteps = nsteps, 
+                         nsims = nsims,
+                         ncores = ncores,
+                         prog.rand = prog.rand,
+                         rec.rand = rec.rand,
+                         infection.FUN = infection.FUN,
+                         recovery.FUN = recovery.FUN,
+                         arrivals.FUN = arrivals.FUN,
+                         departures.FUN = departures.FUN,
+                         get_prev.FUN = get_prev.FUN)
+
+  init <- init.icm(s.num = s.num,
+                   e.num = e.num,
+                   i.num = i.num,
+                   q.num = q.num,
+                   h.num = h.num,
+                   r.num = r.num,
+                   f.num = f.num)
+
+  param <-  param.icm(inf.prob.e = inf.prob.e, 
+                      act.rate.e = act.rate.e,
+                      inf.prob.i = inf.prob.i, 
+                      act.rate.i = act.rate.i,
+                      inf.prob.q = inf.prob.q, 
+                      act.rate.q = act.rate.q,                    
+                      quar.rate = quar.rate,
+                      hosp.rate = hosp.rate,
+                      disch.rate = disch.rate,
+                      prog.rate = prog.rate,
+                      prog.dist.scale = prog.dist.scale,
+                      prog.dist.shape = prog.dist.shape,
+                      rec.rate = rec.rate,
+                      rec.dist.scale = rec.dist.scale,
+                      rec.dist.shape = rec.dist.shape,
+                      fat.rate.base = fat.rate.base,
+                      hosp.cap = hosp.cap,
+                      fat.rate.overcap = fat.rate.overcap,
+                      fat.tcoeff = fat.tcoeff,
+                      vital = vital,
+                      a.rate = a.rate, 
+                      a.prop.e = a.prop.e,
+                      a.prop.i = a.prop.i,
+                      a.prop.q = a.prop.q,
+                      ds.rate = ds.rate, 
+                      de.rate = de.rate, 
+                      di.rate = di.rate,
+                      dq.rate = dq.rate,
+                      dh.rate = dh.rate,
+                      dr.rate = dr.rate)
+
+  sim <- icm.seiqhrf(param, init, control)
+  sim_df <- as.data.frame(sim, out=out)
+
+  return(list(sim=sim, df=sim_df))
+}
+```
+
+
+```{r, echo=TRUE, eval=TRUE}
+baseline_sim <- simulate(ncores=2)
+```
+
+## Examining the results
+### Checking distributions of duration in key compartments
+
+```{r, echo=FALSE, eval=TRUE}
+# define a function to extract timings and assemble a data frame
+get_times <- function(simulate_results) {
+
+  sim <- simulate_results$sim
+  
+  for (s in 1:sim$control$nsims) {
+    if (s == 1) {
+      times <- sim$times[[paste("sim",s,sep="")]]
+      times <- times %>% mutate(s=s)
+    } else {
+      times <- times %>%
+        bind_rows(sim$times[[paste("sim",s,sep="")]] %>%
+                    mutate(s=s))
+    }
+  }
+  
+  times <- times %>%
+            mutate(infTime=ifelse(infTime <0, -5, infTime),
+                   expTime=ifelse(expTime <0, -5, expTime)) %>%
+            mutate(incubation_period = infTime - expTime,
+                   illness_duration = recovTime - expTime,
+                   illness_duration_hosp = dischTime - expTime,
+                   hosp_los = dischTime - hospTime,
+                   quarantine_delay = quarTime - infTime,
+                   survival_time = fatTime - infTime) %>%
+            select(s, 
+                   incubation_period,
+                   quarantine_delay,
+                   illness_duration,
+                   illness_duration_hosp,
+                   hosp_los,
+                   survival_time) %>%
+            pivot_longer(-s, names_to="period_type",
+                             values_to="duration") %>%
+            mutate(period_type = factor(period_type, levels=c("incubation_period",
+                                            "quarantine_delay",
+                                            "illness_duration",
+                                            "illness_duration_hosp",
+                                            "hosp_los",
+                                            "survival_time"),
+                                   labels=c("Incubation period",
+                                            "Delay entering isolation",
+                                            "Illness duration",
+                                            "Illness duration (hosp)",
+                                            "Hospital care required duration",
+                                            "Survival time of case fatalities"),
+                                   ordered = TRUE))
+  return(times)
+}
+```
+
+
+
+```{r, echo=FALSE, eval=TRUE}
+times <- get_times(baseline_sim)
+```
+
+```{r, echo=FALSE, eval=TRUE, fig.height=12, fig.width=8}
+times %>%
+  filter(duration <= 30) %>%
+  ggplot(aes(x=duration)) +
+    geom_bar() +
+    facet_grid(period_type~., scales="free_y") +
+    labs(title="Duration frequency distributions",
+         subtitle="Baseline simulation") + xlab("Duration (in days)")
+```
+
+
+## The Baseline pravalence plot 
+
+```{r, echo=FALSE, eval=TRUE, layout="l-body-outset"}
+baseline_plot_df <- baseline_sim$df %>%
+  # use only the prevalence columns
+  select(time, s.num, e.num, i.num, q.num, 
+         h.num, r.num, f.num) %>%
+  # examine only the first 100 days since it
+  # is all over by then using the default parameters
+  filter(time <= 100) %>%
+  pivot_longer(-c(time),
+               names_to="compartment",
+               values_to="count")
+
+# define a standard set of colors to represent compartments
+compcols <- c("s.num" = "yellow", "e.num" = "orange", "i.num" = "red",
+              "q.num" = "cyan", "h.num" = "magenta", "r.num" = "lightgreen",
+              "f.num" = "black")
+complabels <- c("s.num" = "Susceptible", "e.num" = "Infected/asymptomatic", 
+                "i.num" = "Infected/infectious", "q.num" = "Self-isolated",
+                "h.num" = "Requires hospitalization", "r.num" = "Recovered",
+                "f.num" = "Case fatality")
+
+baseline_plot_df %>%
+  ggplot(aes(x=time, y=count, color=compartment)) +
+    geom_line(size=2, alpha=0.7) +
+    scale_color_manual(values = compcols, labels=complabels) +
+    theme_dark() +
+    labs(title="Baseline simulation",
+         x="Days since beginning of epidemic",
+         y="Prevalence (persons)")
+```
+
+
+### Replot without "S" and "R" compartment.
+```{r, echo=TRUE, eval=TRUE, layout="l-body-outset"}
+baseline_plot_df %>%
+  filter(compartment %in% c("e.num","i.num",
+                            "q.num","h.num",
+                            "f.num")) %>%
+  ggplot(aes(x=time, y=count, color=compartment)) +
+    geom_line(size=2, alpha=0.7) +
+    scale_color_manual(values = compcols, labels=complabels) +
+    theme_dark() +
+    labs(title="Baseline simulation",
+         x="Days since beginning of epidemic",
+         y="Prevalence (persons)")
+```
+
+
+
+
+##  Experiment 1 - more social distancing starting at day 15
+
+First, examing the social distancing effect. Assume we starting at day 15, in everyone except the self-isolated, who are already practicing it. But we'll leave the self-isolation rate at the baseline desultory rate. Increasing social distancing decrease the number of exposure events between the infected and the susceptible each day to half of the number before social distancing.
+
+
+```{r, echo=TRUE, eval=TRUE}
+social_distancing_day15_ramp <- function(t) {
+  ifelse(t < 15, 10, ifelse(t <= 30, 10 - (t-15)*(10 - 5)/15, 5))
+}
+
+t15_social_distancing_sim <- simulate(act.rate.i = social_distancing_day15_ramp(1:366),
+                                      act.rate.e = social_distancing_day15_ramp(1:366))
+```
+
+
+
+## Experiment 2 - more social distancing at day 15 and less social distancing starting at day 30
+
+Let's exam if we start practicing social distancing at day 15 and stop practicing social distancing, starting at day 30, and leave everything else the same.
+
+```{r, echo=TRUE, eval=TRUE}
+social_distancing_day30_ramp <- function(t) {
+   ifelse(t < 15, 10, ifelse(t <= 30, 10 - (t-15)*(10 - 5)/15, ifelse(t <= 45, 5 - (t-30)*(5 - 10)/15, 10)))
+}
+
+t30_social_distancing_sim <- simulate(act.rate.i = social_distancing_day30_ramp(1:366),
+                                      act.rate.e = social_distancing_day30_ramp(1:366))
+```
+
+## Experiment 3 - more social distancing at day 15 and less social distancing starting at day 60
+
+Let's repeat that, we stop practicing social distancing, starting at day 60.
+
+```{r, echo=TRUE, eval=TRUE}
+social_distancing_day60_ramp <- function(t) {
+  ifelse(t < 15, 10, ifelse(t <= 30, 10 - (t-15)*(10 - 5)/15, ifelse(t <= 60, 5, ifelse(t<=75, 5 - (t-30)*(5 - 10)/15, 10))))  }
+
+t60_social_distancing_sim <- simulate(act.rate.i = social_distancing_day60_ramp(1:366),
+                                      act.rate.e = social_distancing_day60_ramp(1:366))
+```
+
+
+## Experiment 4 - more social distancing at day 15 and less social distancing starting at day 90
+
+Let's repeat that, we stop practicing social distancing, starting at day 90.
+
+```{r, echo=TRUE, eval=TRUE}
+social_distancing_day90_ramp <- function(t) {
+    ifelse(t < 15, 10, ifelse(t <= 30, 10 - (t-15)*(10 - 5)/15, ifelse(t <= 90, 5, ifelse(t<=105, 5 - (t-30)*(5 - 10)/15, 10)))) 
+}
+
+t90_social_distancing_sim <- simulate(act.rate.i = social_distancing_day90_ramp(1:366),
+                                      act.rate.e = social_distancing_day90_ramp(1:366))
+```
+
+
+## Experiment 5 - increase both social distancing and self-isolation rates starting day 15 and decrease both social distancing and self-isolation rates starting at day 90
+
+```{r, echo=TRUE, eval=TRUE}
+quar_rate_ramp <- function(t) {
+  ifelse(t < 15, 0.0333, ifelse(t <= 30, 0.0333 + (t-15)*(0.5 - 0.0333)/15, 
+                                ifelse(t < 90, 0.5, ifelse(t <= 105, 0.5 - (t-90)*(0.5 - 0.0333 )/15, 0.0333 ))))
+
+}
+
+ramp_quar_rate_sim <- simulate(quar.rate = quar_rate_ramp(1:366))  
+```
+
+```{r, echo=TRUE, eval=TRUE}
+t90_soc_dist_quar_sim <- simulate(act.rate.i = social_distancing_day90_ramp(1:366),
+                                  act.rate.e = social_distancing_day90_ramp(1:366),
+                                  quar.rate = quar_rate_ramp(1:366))
+```
+
+## Comparing Interventions
+
+visualize all those intervention experiments in one plot.
+
+```{r, echo=TRUE, eval=TRUE, fig.height=12, fig.width=6, layout="l-body-outset"}
+baseline_sim$df %>%
+  select(time, s.num, e.num, i.num, q.num, 
+                     h.num, r.num, f.num) %>%
+              mutate(experiment = "0. Baseline") %>%
+  bind_rows(t15_social_distancing_sim$df %>%
+              select(time, s.num, e.num, i.num, q.num, 
+                     h.num, r.num, f.num) %>%
+              mutate(experiment = "1. incr soc dist @ t=15")) %>%
+  bind_rows(t30_social_distancing_sim$df %>%
+              select(time, s.num, e.num, i.num, q.num, 
+                     h.num, r.num, f.num) %>%
+              mutate(experiment = "2. incr soc dist @ t=15 &decr soc dist @ t=30")) %>%
+  bind_rows(t60_social_distancing_sim$df %>%
+              select(time, s.num, e.num, i.num, q.num, 
+                     h.num, r.num, f.num) %>%
+              mutate(experiment = "3. incr soc dist @ t=15 &decr soc dist @ t=60")) %>%
+  bind_rows(t90_social_distancing_sim$df %>%
+              select(time, s.num, e.num, i.num, q.num, 
+                     h.num, r.num, f.num) %>%
+              mutate(experiment = "4. incr soc dist @ t=15 &decr soc dist @ t=90")) %>%
+  bind_rows(t90_soc_dist_quar_sim$df %>%
+              select(time, s.num, e.num, i.num, q.num, 
+                     h.num, r.num, f.num) %>%
+              mutate(experiment = "5. incr soc dist & quar @ t=15 & decr soc dist & quar @ t=90")) %>%
+  filter(time <= 150) %>%
+  pivot_longer(-c(time, experiment),
+               names_to="compartment",
+               values_to="count") %>%
+  filter(compartment %in% c("e.num","i.num",
+                            "q.num","h.num",
+                            "f.num")) -> plot_df
+
+plot_df %>%
+  ggplot(aes(x=time, y=count, color=compartment)) +
+    geom_line(size=1.5, alpha=0.7) +
+    facet_grid(experiment ~ .) +
+    scale_color_manual(values = compcols, labels=complabels) +
+    theme_dark() +
+    labs(title="Baseline vs Interventions",
+         x="Days since beginning of epidemic",
+         y="Prevalence (persons)")
+```
+
+
+## Summary
+Comparing Plot0--the baseline plot and Plot1 -- start social distancing at day 15, we can see that social distancing is effective. Social distancing not only delayed the arraival of peak time but also 'flattened the curve'-- less people got infected and hence less mortality rate.
+
+Plot 2, 3 and 4 show the effect of start social distancing at day 15 but ramp down social distancing starting at day 30, day 60 and day 90 respectively. We will compare each of these three plots with pot1.
+
+Comparing Plot2 and Plot1, we can see that in Plot2, the curves are approximately the same as the curves in Plot1 until around day 30. Then the curves in Plot2 stayed flat for a short period of time but jumped right back again and exceeded the corresponding curves in Plot1 around day 45.  
+
+Comparing Plot3 and Plot1, we can see that in Plot3 the curves are approximately the same as the curves in Plot1 until around day 60. But the curves in Plot3 had a second hump around day 75 when we loosen the social distancing. Though the second hump is lower than the first hump. 
+
+Comparing Plot4 and Plot1, we can see that in Plot4 the curves are approximately the same as the curves in Plot1 until around day 90. But the curves in Plot4 jump right back again and had a second hump around day 115 though lower than the first hump.
+
+Plot 2, 3 and 4 show that if we start practicing social distancing around day 15, we can effectively reduce the spread of the disease. However, there will be another peak around the time we loosen social distancing. But the second peaks are much lower than the corresponding first peaks in each plot. 
+
+Plot 5 shows the combining measures of social distancing and self-isolation. First, we can see that in plot5, the first peak is much lower compared to the previous plots due to increasing both social distancing and self-isolation rates starting day 15. Then around the time we stop both social distancing and self-isolation, the curve jump right back in and result in a much higher peak than the first peak. This shows combining measures is even more powerful in both reducing the spread of the disease and increasing the spread of the disease.  
+
+
+Overall, these experiments show that if we stop social distancing too early(such as in 2 weeks), or don't take the right precautions(such as self-isolation) to prevent future outbreaks, the number of projected deaths could jump right back up. 
+
+
+Let's see that again showing just the _requiring hospitalization_ and _case fatality_ prevalence numbers.
+
+```{r, echo=TRUE, eval=TRUE, fig.height=12, fig.width=6, layout="l-body-outset"}
+plot_df %>%
+  filter(compartment %in% c("h.num",
+                            "f.num")) %>%
+  ggplot(aes(x=time, y=count, color=compartment)) +
+    geom_line(size=1.5, alpha=0.7) +
+    facet_grid(experiment ~ .) +
+    scale_color_manual(values = compcols, labels=complabels) +
+    theme_dark() +
+    labs(title="Baseline vs Interventions",
+         x="Days since beginning of epidemic",
+         y="Prevalence (persons)")
+```
+
+
+
+In each plot, we can see that the number of people required hospitalization exceeds or nearly exceeds the current capacity of 75 beds per 10,000 people. Hence, more hospital beds will be required to fight COVID-19. 
